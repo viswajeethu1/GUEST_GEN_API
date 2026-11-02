@@ -37,7 +37,7 @@ MAJOR_LOGIN_URL    = "https://loginbp.ppmainecoonghj.com/MajorLogin"
 
 X_GA_SV = "1789636317"
 USAGE_PASSWORD = "jeethurviswa"
-MAX_COUNT = 8
+MAX_COUNT = 15
 TIME_BUDGET_SECONDS = 55
 
 REGION_CONFIG = {
