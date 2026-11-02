@@ -16,6 +16,12 @@ from Crypto.Util.Padding import pad
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# Import the provided proto file
+try:
+    import PorTs_pb2
+except ImportError:
+    PorTs_pb2 = None
+
 app = Flask(__name__)
 try:
     app.json.ensure_ascii = False
@@ -34,6 +40,9 @@ OAUTH_TOKEN_URL    = "https://100067.connect.garena.com/oauth/guest/token/grant"
 MAJOR_REGISTER_URL = "https://loginbp.ppmainecoonghj.com/MajorRegister"
 NEWBIE_URL         = "https://loginbp.ppmainecoonghj.com/ChooseNewbieChoice"
 MAJOR_LOGIN_URL    = "https://loginbp.ppmainecoonghj.com/MajorLogin"
+
+# Force IND Server for GetLoginData
+IND_SERVER_URL = "https://client.ind.freefiremobile.com"
 
 X_GA_SV = "1789636317"
 USAGE_PASSWORD = "jeethurviswa"
@@ -84,16 +93,10 @@ MSDK_USER_AGENTS = [
     "GarenaMSDK/4.0.42(SM-G998B ;Android 14;en;IN;app 2.131.0 2019118527;)",
     "GarenaMSDK/4.0.42(CPH2095 ;Android 12;en;ID;app 2.129.1 2019118142;)",
     "GarenaMSDK/4.0.42(Redmi 2404ARN45A ;Android 13;en;IN;app 2.132.0 2019118721;)",
-    "GarenaMSDK/4.0.42(Pixel 6 ;Android 14;en;US;app 2.131.1 2019118602;)",
-    "GarenaMSDK/4.0.42(OnePlus 9 Pro ;Android 13;en;IN;app 2.132.2 2019118783;)",
-    "GarenaMSDK/4.0.42(Xiaomi 13 Pro ;Android 14;en;ID;app 2.130.2 2019118441;)",
-    "GarenaMSDK/4.0.42(realme RMX2189 ;Android 10;en;IN;app 2.130.0 2019118321;)",
 ]
 UNITY_USER_AGENTS = [
     "UnityPlayer/2018.4.12f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)",
     "UnityPlayer/2021.3.27f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)",
-    "UnityPlayer/2022.3.47f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)",
-    "UnityPlayer/2020.3.45f1 (UnityWebRequest/1.0, libcurl/8.5.0-DEV)",
 ]
 IP_ADDRESSES = [f"151.158.158.{n}" for n in range(220, 240)]
 
@@ -281,6 +284,57 @@ def send_major_login(session, access_token, open_id, server, ua=None):
     if len(r.content) <= 64: raise Exception("MajorLogin response too short")
     return parse_proto(r.content[64:])
 
+def send_get_login_data(session, jwt_token, server_url, account_id, uid, ua=None):
+    """Uses PorTs_pb2 to force registration on the IND server."""
+    if not PorTs_pb2:
+        return {"error": "PorTs_pb2 not loaded"}
+    
+    try:
+        url = f"{server_url}/GetLoginData"
+        host = server_url.split("//")[1] if "//" in server_url else server_url
+        
+        try: uid_int = int(uid)
+        except: uid_int = 0
+            
+        encrypted = aes_encrypt(assemble_proto({1: uid_int}))
+        
+        headers = {
+            "Host": host, "User-Agent": ua or UNITY_USER_AGENTS[0], 
+            "Accept": "*/*", "Accept-Encoding": "deflate, gzip",
+            "Authorization": f"Bearer {jwt_token}", "X-Unity-Version": "2018.4.12f1", 
+            "X-GA": "v1 1", "X-GA-SV": X_GA_SV, "ReleaseVersion": "OB55", 
+            "Content-Type": "application/x-www-form-urlencoded", 
+            "Content-Length": str(len(encrypted))
+        }
+        
+        r = session.post(url, data=encrypted, headers=headers, timeout=15, verify=False)
+        
+        if r.status_code != 200: 
+            return {"http_status": r.status_code, "error": f"HTTP {r.status_code}"}
+        
+        # Parse the response using PorTs_pb2
+        candidates = [r.content]
+        if len(r.content) > 64: 
+            candidates.append(r.content[64:])
+            
+        for blob in candidates:
+            try:
+                proto = PorTs_pb2.GetLoginData()
+                proto.ParseFromString(blob)
+                if proto.AccountUID or proto.Online_IP_Port or proto.AccountIP_Port:
+                    return {
+                        "AccountUID": int(proto.AccountUID) if proto.AccountUID else None, 
+                        "Region": proto.Region or None, 
+                        "AccountName": proto.AccountName or None, 
+                        "Online_IP_Port": proto.Online_IP_Port or None, 
+                        "AccountIP_Port": proto.AccountIP_Port or None
+                    }
+            except Exception: 
+                continue
+        return {"error": "could not parse"}
+    except Exception as e: 
+        return {"error": str(e)[:200]}
+
 # --- WORKER ---
 def create_account(index, prefix, region, deadline):
     if time.time() > deadline:
@@ -322,6 +376,11 @@ def create_account(index, prefix, region, deadline):
         if isinstance(jwt, bytes): jwt = jwt.decode("utf-8", errors="ignore")
         if not jwt: raise RuntimeError("JWT missing")
 
+        # Call GetLoginData to force it to register in IND instead of NA
+        login_data = None
+        if region == "IND":
+            login_data = send_get_login_data(session, jwt, IND_SERVER_URL, account_id, uid, unity_ua)
+
         return {
             "index": index,
             "success": True,
@@ -332,7 +391,8 @@ def create_account(index, prefix, region, deadline):
             "jwt": jwt,
             "open_id": open_id,
             "region": region,
-            "status": "unregistered", # As requested
+            "status": "unregistered" if not login_data else "registered",
+            "login_data": login_data,
             "created_at": datetime.utcnow().isoformat() + "Z"
         }
 
